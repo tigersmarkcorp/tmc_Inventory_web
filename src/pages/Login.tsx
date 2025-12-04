@@ -142,9 +142,7 @@ const Login = () => {
               transition={{ delay: 0.3, duration: 0.5 }}
               className="mb-6"
             >
-              <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/90 backdrop-blur-sm text-primary-foreground font-bold text-2xl shadow-lg">
-                TM
-              </div>
+             
             </motion.div>
 
             {/* Text Content */}
