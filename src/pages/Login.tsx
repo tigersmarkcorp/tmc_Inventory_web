@@ -236,7 +236,7 @@ const Login = () => {
           <div className="lg:hidden flex items-center justify-center gap-3 mb-8">
               <div className="flex h-100 w-300 items-center justify-center">
   <img 
-    src="./public/TMClog0s.png" 
+    src="/TMClog0s.png" 
     alt="Tiger's Mark Corporation Logo"
     className="h-[70px] w-auto object-contain" // adjust size as needed
   />
