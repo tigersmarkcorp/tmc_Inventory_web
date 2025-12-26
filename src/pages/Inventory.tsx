@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
 import { Button } from "@/components/ui/button";
@@ -62,44 +62,65 @@ const Inventory = () => {
   });
   const [editImage, setEditImage] = useState<File | null>(null);
 
-  const { data: items = [], isLoading } = useQuery({
+  // 🔁 Fetch inventory items
+  const { data: items = [], isLoading: inventoryLoading } = useQuery({
     queryKey: ['inventory-items'],
     queryFn: async () => {
       const { data, error } = await supabase
         .from('inventory_items')
         .select('*')
         .order('created_at', { ascending: false });
-      
       if (error) throw error;
       return data || [];
     },
   });
 
+  // 🔁 Fetch borrowed items to calculate totals
+  const { data: borrowedItems = [], isLoading: borrowedLoading } = useQuery({
+    queryKey: ['borrowed-items'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('borrowed_items')
+        .select('item_id, quantity, status');
+      if (error) throw error;
+      return data || [];
+    },
+  });
+
+  // 🧮 Compute total items = current + borrowed (only Active/Overdue)
+  const itemsWithTotals = useMemo(() => {
+    if (!items.length) return items;
+
+    const borrowedMap: Record<string, number> = {};
+    borrowedItems.forEach(borrow => {
+      if (borrow.status === 'Active' || borrow.status === 'Overdue') {
+        borrowedMap[borrow.item_id] = (borrowedMap[borrow.item_id] || 0) + borrow.quantity;
+      }
+    });
+
+    return items.map(item => ({
+      ...item,
+      totalItems: item.quantity + (borrowedMap[item.id] || 0),
+    }));
+  }, [items, borrowedItems]);
+
   const addItemMutation = useMutation({
     mutationFn: async (item: typeof newItem) => {
       const status = item.quantity === 0 ? "Out of Stock" : item.quantity < 30 ? "Low Stock" : "In Stock";
-      
       let imageUrl = null;
-      
-      // Upload image if provided
       if (item.image) {
         const fileExt = item.image.name.split('.').pop();
         const fileName = `${Math.random()}.${fileExt}`;
         const filePath = `${fileName}`;
-
         const { error: uploadError } = await supabase.storage
           .from('item-images')
           .upload(filePath, item.image);
-
         if (uploadError) throw uploadError;
-
         const { data: { publicUrl } } = supabase.storage
           .from('item-images')
           .getPublicUrl(filePath);
-
         imageUrl = publicUrl;
       }
-      
       const { data, error } = await supabase
         .from('inventory_items')
         .insert([{ 
@@ -116,13 +137,13 @@ const Inventory = () => {
         }])
         .select()
         .single();
-      
       if (error) throw error;
       return data;
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] });
       queryClient.invalidateQueries({ queryKey: ['inventory-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['borrowed-items'] });
       logActivity('ADD', `Added inventory item: ${data.name}`, 'inventory_items', data.id);
       toast({
         title: "Success",
@@ -153,34 +174,24 @@ const Inventory = () => {
   const updateItemMutation = useMutation({
     mutationFn: async ({ id, updates, image }: { id: string; updates: any; image?: File | null }) => {
       const status = updates.quantity === 0 ? "Out of Stock" : updates.quantity < 30 ? "Low Stock" : "In Stock";
-      
       let imageUrl = updates.image_url;
-      
-      // Upload new image if provided
       if (image) {
-        // Delete old image if exists
         if (updates.image_url) {
           const oldPath = updates.image_url.split('/').pop();
           await supabase.storage.from('item-images').remove([oldPath]);
         }
-
         const fileExt = image.name.split('.').pop();
         const fileName = `${Math.random()}.${fileExt}`;
         const filePath = `${fileName}`;
-
         const { error: uploadError } = await supabase.storage
           .from('item-images')
           .upload(filePath, image);
-
         if (uploadError) throw uploadError;
-
         const { data: { publicUrl } } = supabase.storage
           .from('item-images')
           .getPublicUrl(filePath);
-
         imageUrl = publicUrl;
       }
-      
       const { data, error } = await supabase
         .from('inventory_items')
         .update({ 
@@ -198,13 +209,13 @@ const Inventory = () => {
         .eq('id', id)
         .select()
         .single();
-      
       if (error) throw error;
       return data;
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] });
       queryClient.invalidateQueries({ queryKey: ['inventory-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['borrowed-items'] });
       logActivity('UPDATE', `Updated inventory item: ${data.name}`, 'inventory_items', data.id);
       toast({
         title: "Success",
@@ -225,29 +236,25 @@ const Inventory = () => {
 
   const deleteItemMutation = useMutation({
     mutationFn: async (id: string) => {
-      // Get the item to find image URL
       const { data: item } = await supabase
         .from('inventory_items')
         .select('image_url')
         .eq('id', id)
         .single();
-
-      // Delete image from storage if exists
       if (item?.image_url) {
         const imagePath = item.image_url.split('/').pop();
         await supabase.storage.from('item-images').remove([imagePath]);
       }
-
       const { error } = await supabase
         .from('inventory_items')
         .delete()
         .eq('id', id);
-      
       if (error) throw error;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] });
       queryClient.invalidateQueries({ queryKey: ['inventory-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['borrowed-items'] });
       toast({
         title: "Success",
         description: "Item deleted successfully",
@@ -265,20 +272,19 @@ const Inventory = () => {
   const updateQuantityMutation = useMutation({
     mutationFn: async ({ id, newQuantity }: { id: string; newQuantity: number }) => {
       const status = newQuantity === 0 ? "Out of Stock" : newQuantity < 30 ? "Low Stock" : "In Stock";
-      
       const { data, error } = await supabase
         .from('inventory_items')
         .update({ quantity: newQuantity, status })
         .eq('id', id)
         .select()
         .single();
-      
       if (error) throw error;
       return data;
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['inventory-items'] });
       queryClient.invalidateQueries({ queryKey: ['inventory-stats'] });
+      queryClient.invalidateQueries({ queryKey: ['borrowed-items'] });
     },
     onError: (error: any) => {
       toast({
@@ -303,13 +309,11 @@ const Inventory = () => {
       });
       return;
     }
-
     addItemMutation.mutate(newItem);
   };
 
   const handleEditItem = () => {
     if (!editingItem) return;
-
     updateItemMutation.mutate({
       id: editingItem.id,
       updates: {
@@ -364,11 +368,13 @@ const Inventory = () => {
     return diffDays;
   };
 
-  const filteredItems = items.filter(
+  const filteredItems = itemsWithTotals.filter(
     (item: any) =>
       item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
       item.category.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  const isLoading = inventoryLoading || borrowedLoading;
 
   return (
     <SidebarProvider>
@@ -391,68 +397,247 @@ const Inventory = () => {
                 Logout
               </Button>
             </header>
-
-          <main className="flex-1 p-6 overflow-y-auto">
-            <div className="max-w-7xl mx-auto space-y-6">
-              <div className="flex flex-col sm:flex-row gap-4 items-center justify-between">
-                <div className="relative w-full sm:w-96">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
-                  <Input
-                    placeholder="Search inventory..."
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                    className="pl-10"
-                  />
-                </div>
-                <div className="flex gap-2 w-full sm:w-auto">
-                  <Button variant="outline" className="gap-2 flex-1 sm:flex-initial">
-                    <Filter className="h-4 w-4" />
-                    Filter
-                  </Button>
-                  <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
-                    <DialogTrigger asChild>
-                      <Button className="gap-2 bg-primary hover:bg-primary-hover flex-1 sm:flex-initial">
-                        <Plus className="h-4 w-4" />
-                        Add Item
-                      </Button>
-                    </DialogTrigger>
-                   <DialogContent className="max-w-lg max-h-[90vh] overflow-hidden flex flex-col border-border/60 shadow-elegant bg-card !fixed !left-1/2 !top-1/2 !-translate-x-1/2 !-translate-y-1/2">
-                      <DialogHeader className="px-6 pt-6 pb-4 border-b border-border/40 bg-muted/30">
-                        <div className="flex items-center gap-3">
-                          <div className="h-10 w-10 rounded-xl bg-gradient-hero flex items-center justify-center shadow-md">
-                            <Package className="h-5 w-5 text-primary-foreground" />
+            <main className="flex-1 p-6 overflow-y-auto">
+              <div className="max-w-7xl mx-auto space-y-6">
+                <div className="flex flex-col sm:flex-row gap-4 items-center justify-between">
+                  <div className="relative w-full sm:w-96">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+                    <Input
+                      placeholder="Search inventory..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="pl-10"
+                    />
+                  </div>
+                  <div className="flex gap-2 w-full sm:w-auto">
+                    <Button variant="outline" className="gap-2 flex-1 sm:flex-initial">
+                      <Filter className="h-4 w-4" />
+                      Filter
+                    </Button>
+                    <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
+                      <DialogTrigger asChild>
+                        <Button className="gap-2 bg-primary hover:bg-primary-hover flex-1 sm:flex-initial">
+                          <Plus className="h-4 w-4" />
+                          Add Item
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent className="max-w-lg max-h-[90vh] overflow-hidden flex flex-col border-border/60 shadow-elegant bg-card !fixed !left-1/2 !top-1/2 !-translate-x-1/2 !-translate-y-1/2">
+                        <DialogHeader className="px-6 pt-6 pb-4 border-b border-border/40 bg-muted/30">
+                          <div className="flex items-center gap-3">
+                            <div className="h-10 w-10 rounded-xl bg-gradient-hero flex items-center justify-center shadow-md">
+                              <Package className="h-5 w-5 text-primary-foreground" />
+                            </div>
+                            <div>
+                              <DialogTitle className="text-xl font-bold text-foreground">Add New Inventory Item</DialogTitle>
+                              <p className="text-xs text-muted-foreground mt-0.5">Fill in the details below</p>
+                            </div>
                           </div>
-                          <div>
-                            <DialogTitle className="text-xl font-bold text-foreground">Add New Inventory Item</DialogTitle>
-                            <p className="text-xs text-muted-foreground mt-0.5">Fill in the details below</p>
+                        </DialogHeader>
+                        <div className="space-y-5 px-6 py-5 overflow-y-auto flex-1">
+                          <div className="space-y-2">
+                            <Label htmlFor="name" className="text-sm font-medium text-foreground">Item Name <span className="text-destructive">*</span></Label>
+                            <Input
+                              id="name"
+                              value={newItem.name}
+                              onChange={(e) =>
+                                setNewItem({ ...newItem, name: e.target.value })
+                              }
+                              placeholder="Enter item name"
+                              className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30 transition-all"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="category" className="text-sm font-medium text-foreground">Category <span className="text-destructive">*</span></Label>
+                            <Select
+                              value={newItem.category}
+                              onValueChange={(value) =>
+                                setNewItem({ ...newItem, category: value })
+                              }
+                            >
+                              <SelectTrigger className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30">
+                                <SelectValue placeholder="Select category" />
+                              </SelectTrigger>
+                              <SelectContent className="rounded-xl border-border/60 shadow-elegant">
+                                <SelectItem value="Construction Materials">
+                                  Construction Materials
+                                </SelectItem>
+                                <SelectItem value="Safety Equipment">
+                                  Safety Equipment
+                                </SelectItem>
+                                <SelectItem value="Tools">Tools</SelectItem>
+                                <SelectItem value="Finishing Materials">
+                                  Finishing Materials
+                                </SelectItem>
+                                <SelectItem value="Equipment">Equipment</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <Label htmlFor="quantity" className="text-sm font-medium text-foreground">Quantity</Label>
+                              <Input
+                                id="quantity"
+                                type="number"
+                                value={newItem.quantity}
+                                onChange={(e) =>
+                                  setNewItem({
+                                    ...newItem,
+                                    quantity: parseInt(e.target.value) || 0,
+                                  })
+                                }
+                                placeholder="0"
+                                className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <Label htmlFor="unit_price" className="text-sm font-medium text-foreground">Unit Price</Label>
+                              <Input
+                                id="unit_price"
+                                type="number"
+                                step="0.01"
+                                value={newItem.unit_price}
+                                onChange={(e) =>
+                                  setNewItem({
+                                    ...newItem,
+                                    unit_price: parseFloat(e.target.value) || 0,
+                                  })
+                                }
+                                placeholder="0.00"
+                                className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30"
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="location" className="text-sm font-medium text-foreground">Location <span className="text-destructive">*</span></Label>
+                            <Input
+                              id="location"
+                              value={newItem.location}
+                              onChange={(e) =>
+                                setNewItem({ ...newItem, location: e.target.value })
+                              }
+                              placeholder="Warehouse, Storage, etc."
+                              className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="condition" className="text-sm font-medium text-foreground">Item Condition <span className="text-destructive">*</span></Label>
+                            <Select
+                              value={newItem.condition}
+                              onValueChange={(value) =>
+                                setNewItem({ ...newItem, condition: value })
+                              }
+                            >
+                              <SelectTrigger className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30">
+                                <SelectValue placeholder="Select condition" />
+                              </SelectTrigger>
+                              <SelectContent className="rounded-xl border-border/60 shadow-elegant">
+                                <SelectItem value="Brand New">Brand New</SelectItem>
+                                <SelectItem value="Fair">Fair</SelectItem>
+                                <SelectItem value="Defected">Defected</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="description" className="text-sm font-medium text-foreground">Additional Notes</Label>
+                            <Textarea
+                              id="description"
+                              value={newItem.description}
+                              onChange={(e) =>
+                                setNewItem({ ...newItem, description: e.target.value })
+                              }
+                              placeholder="Enter any additional details"
+                              rows={2}
+                              className="rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30 resize-none"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor="image" className="text-sm font-medium text-foreground">Item Image</Label>
+                            <div className="flex gap-2">
+                              <Input
+                                ref={fileInputRef}
+                                id="image"
+                                type="file"
+                                accept="image/*"
+                                capture="environment"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0] || null;
+                                  setNewItem({ ...newItem, image: file });
+                                }}
+                                className="flex-1 h-11 rounded-xl border-border/60 bg-background file:bg-primary file:text-primary-foreground file:border-0 file:rounded-lg file:px-3 file:py-1 file:mr-3 file:text-sm file:font-medium"
+                              />
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="icon"
+                                onClick={handleCameraCapture}
+                                className="h-11 w-11 rounded-xl border-border/60 hover:bg-primary/10 hover:border-primary/50"
+                              >
+                                <Camera className="h-4 w-4" />
+                              </Button>
+                            </div>
+                            {newItem.image && (
+                              <p className="text-xs text-muted-foreground bg-muted/50 px-3 py-2 rounded-lg">
+                                📎 Selected: {newItem.image.name}
+                              </p>
+                            )}
                           </div>
                         </div>
-                      </DialogHeader>
+                        <div className="flex gap-3 justify-end px-6 pb-6 pt-4 border-t border-border/40 bg-muted/20">
+                          <Button
+                            variant="outline"
+                            onClick={() => setIsAddDialogOpen(false)}
+                            className="rounded-xl border-border/60 hover:bg-muted"
+                          >
+                            Cancel
+                          </Button>
+                          <Button onClick={handleAddItem} disabled={addItemMutation.isPending} className="rounded-xl bg-gradient-hero shadow-md hover:shadow-lg transition-all">
+                            {addItemMutation.isPending ? "Adding..." : "Add Item"}
+                          </Button>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+                </div>
+
+                {/* Edit Dialog */}
+                <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+                  <DialogContent className="max-w-lg max-h-[90vh] overflow-hidden flex flex-col border-border/60 shadow-elegant bg-card !fixed !left-1/2 !top-1/2 !-translate-x-1/2 !-translate-y-1/2">
+                    <DialogHeader className="px-6 pt-6 pb-4 border-b border-border/40 bg-muted/30">
+                      <div className="flex items-center gap-3">
+                        <div className="h-10 w-10 rounded-xl bg-gradient-hero flex items-center justify-center shadow-md">
+                          <Edit className="h-5 w-5 text-primary-foreground" />
+                        </div>
+                        <div>
+                          <DialogTitle className="text-xl font-bold text-foreground">Edit Inventory Item</DialogTitle>
+                          <p className="text-xs text-muted-foreground mt-0.5">Update item details</p>
+                        </div>
+                      </div>
+                    </DialogHeader>
+                    {editingItem && (
                       <div className="space-y-5 px-6 py-5 overflow-y-auto flex-1">
                         <div className="space-y-2">
-                          <Label htmlFor="name" className="text-sm font-medium text-foreground">Item Name <span className="text-destructive">*</span></Label>
+                          <Label htmlFor="edit-name" className="text-sm font-medium text-foreground">Item Name <span className="text-destructive">*</span></Label>
                           <Input
-                            id="name"
-                            value={newItem.name}
+                            id="edit-name"
+                            value={editingItem.name}
                             onChange={(e) =>
-                              setNewItem({ ...newItem, name: e.target.value })
+                              setEditingItem({ ...editingItem, name: e.target.value })
                             }
-                            placeholder="Enter item name"
                             className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30 transition-all"
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="category" className="text-sm font-medium text-foreground">Category <span className="text-destructive">*</span></Label>
+                          <Label htmlFor="edit-category">Category *</Label>
                           <Select
-                            value={newItem.category}
+                            value={editingItem.category}
                             onValueChange={(value) =>
-                              setNewItem({ ...newItem, category: value })
+                              setEditingItem({ ...editingItem, category: value })
                             }
                           >
-                            <SelectTrigger className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30">
-                              <SelectValue placeholder="Select category" />
+                            <SelectTrigger>
+                              <SelectValue />
                             </SelectTrigger>
-                            <SelectContent className="rounded-xl border-border/60 shadow-elegant">
+                            <SelectContent>
                               <SelectItem value="Construction Materials">
                                 Construction Materials
                               </SelectItem>
@@ -467,429 +652,297 @@ const Inventory = () => {
                             </SelectContent>
                           </Select>
                         </div>
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="space-y-2">
-                            <Label htmlFor="quantity" className="text-sm font-medium text-foreground">Quantity</Label>
-                            <Input
-                              id="quantity"
-                              type="number"
-                              value={newItem.quantity}
-                              onChange={(e) =>
-                                setNewItem({
-                                  ...newItem,
-                                  quantity: parseInt(e.target.value) || 0,
-                                })
-                              }
-                              placeholder="0"
-                              className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30"
-                            />
-                          </div>
-                          <div className="space-y-2">
-                            <Label htmlFor="unit_price" className="text-sm font-medium text-foreground">Unit Price</Label>
-                            <Input
-                              id="unit_price"
-                              type="number"
-                              step="0.01"
-                              value={newItem.unit_price}
-                              onChange={(e) =>
-                                setNewItem({
-                                  ...newItem,
-                                  unit_price: parseFloat(e.target.value) || 0,
-                                })
-                              }
-                              placeholder="0.00"
-                              className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30"
-                            />
-                          </div>
-                        </div>
                         <div className="space-y-2">
-                          <Label htmlFor="location" className="text-sm font-medium text-foreground">Location <span className="text-destructive">*</span></Label>
+                          <Label htmlFor="edit-quantity">Quantity</Label>
                           <Input
-                            id="location"
-                            value={newItem.location}
+                            id="edit-quantity"
+                            type="number"
+                            value={editingItem.quantity}
                             onChange={(e) =>
-                              setNewItem({ ...newItem, location: e.target.value })
+                              setEditingItem({
+                                ...editingItem,
+                                quantity: parseInt(e.target.value) || 0,
+                              })
                             }
-                            placeholder="Warehouse, Storage, etc."
-                            className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30"
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="condition" className="text-sm font-medium text-foreground">Item Condition <span className="text-destructive">*</span></Label>
+                          <Label htmlFor="edit-location">Location *</Label>
+                          <Input
+                            id="edit-location"
+                            value={editingItem.location}
+                            onChange={(e) =>
+                              setEditingItem({ ...editingItem, location: e.target.value })
+                            }
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="edit-condition">Item Condition *</Label>
                           <Select
-                            value={newItem.condition}
+                            value={editingItem.condition || "Brand New"}
                             onValueChange={(value) =>
-                              setNewItem({ ...newItem, condition: value })
+                              setEditingItem({ ...editingItem, condition: value })
                             }
                           >
-                            <SelectTrigger className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30">
+                            <SelectTrigger>
                               <SelectValue placeholder="Select condition" />
                             </SelectTrigger>
-                            <SelectContent className="rounded-xl border-border/60 shadow-elegant">
+                            <SelectContent>
                               <SelectItem value="Brand New">Brand New</SelectItem>
+                              <SelectItem value="Good">Good</SelectItem>
                               <SelectItem value="Fair">Fair</SelectItem>
                               <SelectItem value="Defected">Defected</SelectItem>
                             </SelectContent>
                           </Select>
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="description" className="text-sm font-medium text-foreground">Additional Notes</Label>
-                          <Textarea
-                            id="description"
-                            value={newItem.description}
+                          <Label htmlFor="edit-unit-price">Unit Price</Label>
+                          <Input
+                            id="edit-unit-price"
+                            type="number"
+                            step="0.01"
+                            value={editingItem.unit_price || 0}
                             onChange={(e) =>
-                              setNewItem({ ...newItem, description: e.target.value })
+                              setEditingItem({
+                                ...editingItem,
+                                unit_price: parseFloat(e.target.value) || 0,
+                              })
                             }
-                            placeholder="Enter any additional details"
-                            rows={2}
-                            className="rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30 resize-none"
+                            placeholder="0.00"
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="image" className="text-sm font-medium text-foreground">Item Image</Label>
-                          <div className="flex gap-2">
-                            <Input
-                              ref={fileInputRef}
-                              id="image"
-                              type="file"
-                              accept="image/*"
-                              capture="environment"
-                              onChange={(e) => {
-                                const file = e.target.files?.[0] || null;
-                                setNewItem({ ...newItem, image: file });
-                              }}
-                              className="flex-1 h-11 rounded-xl border-border/60 bg-background file:bg-primary file:text-primary-foreground file:border-0 file:rounded-lg file:px-3 file:py-1 file:mr-3 file:text-sm file:font-medium"
-                            />
-                            <Button
-                              type="button"
-                              variant="outline"
-                              size="icon"
-                              onClick={handleCameraCapture}
-                              className="h-11 w-11 rounded-xl border-border/60 hover:bg-primary/10 hover:border-primary/50"
-                            >
-                              <Camera className="h-4 w-4" />
-                            </Button>
-                          </div>
-                          {newItem.image && (
-                            <p className="text-xs text-muted-foreground bg-muted/50 px-3 py-2 rounded-lg">
-                              📎 Selected: {newItem.image.name}
-                            </p>
+                          <Label htmlFor="edit-description">Description</Label>
+                          <Textarea
+                            id="edit-description"
+                            value={editingItem.description || ""}
+                            onChange={(e) =>
+                              setEditingItem({ ...editingItem, description: e.target.value })
+                            }
+                            rows={3}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="edit-image">Item Image</Label>
+                          <Input
+                            id="edit-image"
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0] || null;
+                              setEditImage(file);
+                            }}
+                          />
+                          {editingItem.image_url && !editImage && (
+                            <img src={editingItem.image_url} alt="Current" className="mt-2 h-20 w-20 object-cover rounded" />
                           )}
                         </div>
                       </div>
-                      <div className="flex gap-3 justify-end px-6 pb-6 pt-4 border-t border-border/40 bg-muted/20">
-                        <Button
-                          variant="outline"
-                          onClick={() => setIsAddDialogOpen(false)}
-                          className="rounded-xl border-border/60 hover:bg-muted"
-                        >
-                          Cancel
-                        </Button>
-                        <Button onClick={handleAddItem} disabled={addItemMutation.isPending} className="rounded-xl bg-gradient-hero shadow-md hover:shadow-lg transition-all">
-                          {addItemMutation.isPending ? "Adding..." : "Add Item"}
-                        </Button>
-                      </div>
-                    </DialogContent>
-                  </Dialog>
+                    )}
+                    <div className="flex gap-2 justify-end px-6 pb-6 pt-4 border-t">
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          setIsEditDialogOpen(false);
+                          setEditingItem(null);
+                          setEditImage(null);
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                      <Button onClick={handleEditItem} disabled={updateItemMutation.isPending}>
+                        {updateItemMutation.isPending ? "Saving..." : "Save Changes"}
+                      </Button>
+                    </div>
+                  </DialogContent>
+                </Dialog>
+
+                <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+                  {isLoading ? (
+                    <div className="col-span-full text-center py-12">
+                      <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto"></div>
+                    </div>
+                  ) : filteredItems.length === 0 ? (
+                    <div className="col-span-full text-center py-12">
+                      <Package className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
+                      <h3 className="text-lg font-semibold text-foreground mb-2">
+                        No items found
+                      </h3>
+                      <p className="text-muted-foreground">
+                        Try adjusting your search or add a new item
+                      </p>
+                    </div>
+                  ) : (
+                    filteredItems.map((item: any) => (
+                      <Card key={item.id} className="shadow-card hover:shadow-elegant transition-all group">
+                        <div className="aspect-video w-full overflow-hidden rounded-t-lg bg-muted">
+                          <img
+                            src={item.image_url || inventoryPlaceholder}
+                            alt={item.name}
+                            className="h-full w-full object-cover transition-transform group-hover:scale-105"
+                          />
+                        </div>
+                        <CardContent className="p-5 space-y-3">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex-1">
+                              <h3 className="font-semibold text-lg text-foreground mb-1">
+                                {item.name}
+                              </h3>
+                              <div className="flex flex-wrap gap-2 mt-2">
+                                {item.condition === "Brand New" && (
+                                  <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-300 dark:border-blue-800">
+                                    Brand New • Day {getDaysSinceAdded(item.created_at)}
+                                  </Badge>
+                                )}
+                                {item.condition === "Defected" && (
+                                  <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-300 dark:border-red-800">
+                                    Defected
+                                  </Badge>
+                                )}
+                                {item.condition === "Good" && (
+                                  <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 dark:bg-green-950 dark:text-green-300 dark:border-green-800">
+                                    Good
+                                  </Badge>
+                                )}
+                                {item.condition === "Fair" && (
+                                  <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950 dark:text-yellow-300 dark:border-yellow-800">
+                                    Fair
+                                  </Badge>
+                                )}
+                              </div>
+                            </div>
+                            <Badge className={getStatusColor(item.status)}>
+                              {item.status}
+                            </Badge>
+                          </div>
+                          <div className="space-y-2 text-sm">
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Category:</span>
+                              <span className="font-medium text-foreground">
+                                {item.category}
+                              </span>
+                            </div>
+
+                            {/* ✅ UPDATED SECTION: Current Quantity + Total Items ✅ */}
+                            <div className="space-y-2">
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Current Quantity:</span>
+                                <span className="font-medium text-foreground">{item.quantity}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Total Items:</span>
+                                <span className="font-medium text-foreground">{item.totalItems}</span>
+                              </div>
+                              <div className="flex gap-2">
+                                {/* Add Section */}
+                                <div className="flex-1">
+                                  <Label htmlFor={`add-${item.id}`} className="text-xs text-muted-foreground block mb-1">
+                                    Add
+                                  </Label>
+                                  <div className="flex gap-1">
+                                    <Input
+                                      id={`add-${item.id}`}
+                                      type="number"
+                                      min="0"
+                                      placeholder="0"
+                                      className="h-9 text-center flex-1"
+                                    />
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-9 px-2"
+                                      onClick={() => {
+                                        const input = document.getElementById(`add-${item.id}`) as HTMLInputElement;
+                                        const value = parseInt(input?.value) || 0;
+                                        if (value > 0) {
+                                          handleQuantityChange(item.id, item.quantity, value);
+                                          if (input) input.value = '';
+                                        }
+                                      }}
+                                    >
+                                      <Plus className="h-3 w-3" />
+                                    </Button>
+                                  </div>
+                                </div>
+                                {/* Subtract Section */}
+                                <div className="flex-1">
+                                  <Label htmlFor={`subtract-${item.id}`} className="text-xs text-muted-foreground block mb-1">
+                                    Subtract
+                                  </Label>
+                                  <div className="flex gap-1">
+                                    <Input
+                                      id={`subtract-${item.id}`}
+                                      type="number"
+                                      min="0"
+                                      max={item.quantity}
+                                      placeholder="0"
+                                      className="h-9 text-center flex-1"
+                                    />
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-9 px-2"
+                                      onClick={() => {
+                                        const input = document.getElementById(`subtract-${item.id}`) as HTMLInputElement;
+                                        const value = parseInt(input?.value) || 0;
+                                        if (value > 0) {
+                                          handleQuantityChange(item.id, item.quantity, -value);
+                                          if (input) input.value = '';
+                                        }
+                                      }}
+                                    >
+                                      <Minus className="h-3 w-3" />
+                                    </Button>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            {/* ✅ END UPDATED SECTION ✅ */}
+
+                            <div className="flex justify-between">
+                              <span className="text-muted-foreground">Location:</span>
+                              <span className="font-medium text-foreground">
+                                {item.location}
+                              </span>
+                            </div>
+                          </div>
+                          {item.description && (
+                            <p className="text-sm text-muted-foreground line-clamp-2 pt-2 border-t border-border">
+                              {item.description}
+                            </p>
+                          )}
+                          <div className="flex gap-2 pt-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="flex-1 gap-2"
+                              onClick={() => {
+                                setEditingItem(item);
+                                setIsEditDialogOpen(true);
+                              }}
+                            >
+                              <Edit className="h-4 w-4" />
+                              Edit
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="flex-1 gap-2 text-destructive hover:text-destructive"
+                              onClick={() => handleDeleteItem(item.id, item.name)}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Delete
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))
+                  )}
                 </div>
               </div>
-
-              {/* Edit Dialog */}
-              <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
-              <DialogContent className="max-w-lg max-h-[90vh] overflow-hidden flex flex-col border-border/60 shadow-elegant bg-card !fixed !left-1/2 !top-1/2 !-translate-x-1/2 !-translate-y-1/2">
-                  <DialogHeader className="px-6 pt-6 pb-4 border-b border-border/40 bg-muted/30">
-                    <div className="flex items-center gap-3">
-                      <div className="h-10 w-10 rounded-xl bg-gradient-hero flex items-center justify-center shadow-md">
-                        <Edit className="h-5 w-5 text-primary-foreground" />
-                      </div>
-                      <div>
-                        <DialogTitle className="text-xl font-bold text-foreground">Edit Inventory Item</DialogTitle>
-                        <p className="text-xs text-muted-foreground mt-0.5">Update item details</p>
-                      </div>
-                    </div>
-                  </DialogHeader>
-                  {editingItem && (
-                    <div className="space-y-5 px-6 py-5 overflow-y-auto flex-1">
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-name" className="text-sm font-medium text-foreground">Item Name <span className="text-destructive">*</span></Label>
-                        <Input
-                          id="edit-name"
-                          value={editingItem.name}
-                          onChange={(e) =>
-                            setEditingItem({ ...editingItem, name: e.target.value })
-                          }
-                          className="h-11 rounded-xl border-border/60 bg-background focus:ring-2 focus:ring-primary/30 transition-all"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-category">Category *</Label>
-                        <Select
-                          value={editingItem.category}
-                          onValueChange={(value) =>
-                            setEditingItem({ ...editingItem, category: value })
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="Construction Materials">
-                              Construction Materials
-                            </SelectItem>
-                            <SelectItem value="Safety Equipment">
-                              Safety Equipment
-                            </SelectItem>
-                            <SelectItem value="Tools">Tools</SelectItem>
-                            <SelectItem value="Finishing Materials">
-                              Finishing Materials
-                            </SelectItem>
-                            <SelectItem value="Equipment">Equipment</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-quantity">Quantity</Label>
-                        <Input
-                          id="edit-quantity"
-                          type="number"
-                          value={editingItem.quantity}
-                          onChange={(e) =>
-                            setEditingItem({
-                              ...editingItem,
-                              quantity: parseInt(e.target.value) || 0,
-                            })
-                          }
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-location">Location *</Label>
-                        <Input
-                          id="edit-location"
-                          value={editingItem.location}
-                          onChange={(e) =>
-                            setEditingItem({ ...editingItem, location: e.target.value })
-                          }
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-condition">Item Condition *</Label>
-                        <Select
-                          value={editingItem.condition || "Brand New"}
-                          onValueChange={(value) =>
-                            setEditingItem({ ...editingItem, condition: value })
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select condition" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="Brand New">Brand New</SelectItem>
-                            <SelectItem value="Good">Good</SelectItem>
-                            <SelectItem value="Fair">Fair</SelectItem>
-                            <SelectItem value="Defected">Defected</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-unit-price">Unit Price</Label>
-                        <Input
-                          id="edit-unit-price"
-                          type="number"
-                          step="0.01"
-                          value={editingItem.unit_price || 0}
-                          onChange={(e) =>
-                            setEditingItem({
-                              ...editingItem,
-                              unit_price: parseFloat(e.target.value) || 0,
-                            })
-                          }
-                          placeholder="0.00"
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-description">Description</Label>
-                        <Textarea
-                          id="edit-description"
-                          value={editingItem.description || ""}
-                          onChange={(e) =>
-                            setEditingItem({ ...editingItem, description: e.target.value })
-                          }
-                          rows={3}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="edit-image">Item Image</Label>
-                        <Input
-                          id="edit-image"
-                          type="file"
-                          accept="image/*"
-                          onChange={(e) => {
-                            const file = e.target.files?.[0] || null;
-                            setEditImage(file);
-                          }}
-                        />
-                        {editingItem.image_url && !editImage && (
-                          <img src={editingItem.image_url} alt="Current" className="mt-2 h-20 w-20 object-cover rounded" />
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  <div className="flex gap-2 justify-end px-6 pb-6 pt-4 border-t">
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        setIsEditDialogOpen(false);
-                        setEditingItem(null);
-                        setEditImage(null);
-                      }}
-                    >
-                      Cancel
-                    </Button>
-                    <Button onClick={handleEditItem} disabled={updateItemMutation.isPending}>
-                      {updateItemMutation.isPending ? "Saving..." : "Save Changes"}
-                    </Button>
-                  </div>
-                </DialogContent>
-              </Dialog>
-
-              <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-                {isLoading ? (
-                  <div className="col-span-full text-center py-12">
-                    <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto"></div>
-                  </div>
-                ) : filteredItems.length === 0 ? (
-                  <div className="col-span-full text-center py-12">
-                    <Package className="h-16 w-16 text-muted-foreground mx-auto mb-4" />
-                    <h3 className="text-lg font-semibold text-foreground mb-2">
-                      No items found
-                    </h3>
-                    <p className="text-muted-foreground">
-                      Try adjusting your search or add a new item
-                    </p>
-                  </div>
-                ) : (
-                  filteredItems.map((item: any) => (
-                    <Card key={item.id} className="shadow-card hover:shadow-elegant transition-all group">
-                      <div className="aspect-video w-full overflow-hidden rounded-t-lg bg-muted">
-                        <img
-                          src={item.image_url || inventoryPlaceholder}
-                          alt={item.name}
-                          className="h-full w-full object-cover transition-transform group-hover:scale-105"
-                        />
-                      </div>
-                      <CardContent className="p-5 space-y-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1">
-                            <h3 className="font-semibold text-lg text-foreground mb-1">
-                              {item.name}
-                            </h3>
-                            <div className="flex flex-wrap gap-2 mt-2">
-                              {item.condition === "Brand New" && (
-                                <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-300 dark:border-blue-800">
-                                  Brand New • Day {getDaysSinceAdded(item.created_at)}
-                                </Badge>
-                              )}
-                              {item.condition === "Defected" && (
-                                <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-300 dark:border-red-800">
-                                  Defected
-                                </Badge>
-                              )}
-                              {item.condition === "Good" && (
-                                <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 dark:bg-green-950 dark:text-green-300 dark:border-green-800">
-                                  Good
-                                </Badge>
-                              )}
-                              {item.condition === "Fair" && (
-                                <Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200 dark:bg-yellow-950 dark:text-yellow-300 dark:border-yellow-800">
-                                  Fair
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
-                          <Badge className={getStatusColor(item.status)}>
-                            {item.status}
-                          </Badge>
-                        </div>
-
-                        <div className="space-y-2 text-sm">
-                          <div className="flex justify-between">
-                            <span className="text-muted-foreground">Category:</span>
-                            <span className="font-medium text-foreground">
-                              {item.category}
-                            </span>
-                          </div>
-                          <div className="flex justify-between items-center">
-                            <span className="text-muted-foreground">Quantity:</span>
-                            <div className="flex items-center gap-2">
-                              <Button
-                                variant="outline"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={() => handleQuantityChange(item.id, item.quantity, -1)}
-                                disabled={item.quantity === 0 || updateQuantityMutation.isPending}
-                              >
-                                <Minus className="h-3 w-3" />
-                              </Button>
-                              <span className="font-medium text-foreground w-8 text-center">
-                                {item.quantity}
-                              </span>
-                              <Button
-                                variant="outline"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={() => handleQuantityChange(item.id, item.quantity, 1)}
-                                disabled={updateQuantityMutation.isPending}
-                              >
-                                <Plus className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          </div>
-                          <div className="flex justify-between">
-                            <span className="text-muted-foreground">Location:</span>
-                            <span className="font-medium text-foreground">
-                              {item.location}
-                            </span>
-                          </div>
-                        </div>
-
-                        {item.description && (
-                          <p className="text-sm text-muted-foreground line-clamp-2 pt-2 border-t border-border">
-                            {item.description}
-                          </p>
-                        )}
-
-                        <div className="flex gap-2 pt-2">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="flex-1 gap-2"
-                            onClick={() => {
-                              setEditingItem(item);
-                              setIsEditDialogOpen(true);
-                            }}
-                          >
-                            <Edit className="h-4 w-4" />
-                            Edit
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="flex-1 gap-2 text-destructive hover:text-destructive"
-                            onClick={() => handleDeleteItem(item.id, item.name)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                            Delete
-                          </Button>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))
-                )}
-              </div>
-            </div>
-          </main>
+            </main>
+          </div>
         </div>
-      </div>
       </div>
     </SidebarProvider>
   );
