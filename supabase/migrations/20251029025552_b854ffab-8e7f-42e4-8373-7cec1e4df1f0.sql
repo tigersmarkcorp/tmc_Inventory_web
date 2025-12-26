@@ -160,32 +160,3 @@ INSERT INTO public.borrowed_items (item_name, borrower_name, borrower_department
 ('Concrete Mixer', 'Pedro Reyes', 'Construction', 1, '2025-01-14', '2025-01-21', 'Active', 'For foundation work at site B', '/placeholder.svg'),
 ('Welding Machine', 'Ana Cruz', 'Fabrication', 1, '2025-01-12', '2025-01-19', 'Active', 'Structural steel welding project', '/placeholder.svg');  
 
-CREATE OR REPLACE FUNCTION public.restore_borrowed_quantity(item_id UUID, qty_to_add INT)
-RETURNS VOID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public
-AS $$
-BEGIN
-  -- Prevent negative restore
-  IF qty_to_add <= 0 THEN
-    RETURN;
-  END IF;
-
-  -- Only update if item exists
-  UPDATE public.inventory_items
-  SET 
-    quantity = quantity + qty_to_add,
-    status = CASE
-      WHEN quantity + qty_to_add = 0 THEN 'Out of Stock'
-      WHEN quantity + qty_to_add < 30 THEN 'Low Stock'
-      ELSE 'In Stock'
-    END
-  WHERE id = item_id;
-
-  -- Optional: Raise if no row updated
-  IF NOT FOUND THEN
-    RAISE WARNING 'restore_borrowed_quantity: item_id % not found', item_id;
-  END IF;
-END;
-$$;
