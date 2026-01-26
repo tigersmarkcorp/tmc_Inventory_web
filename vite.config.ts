@@ -28,7 +28,7 @@ export default defineConfig(({ mode }) => ({
         start_url: "/",
         icons: [
           {
-            src: "/pwa-192x192.png",
+            src: "/inventoryT.png",
             sizes: "192x192",
             type: "image/png",
           },
