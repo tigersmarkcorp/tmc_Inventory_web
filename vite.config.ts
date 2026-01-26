@@ -33,12 +33,12 @@ export default defineConfig(({ mode }) => ({
             type: "image/png",
           },
           {
-            src: "/inventoryT.png",
+            src: "/inventoryBG.png",
             sizes: "512x512",
             type: "image/png",
           },
           {
-            src: "/inventoryT.png",
+            src: "/inventoryBG.png",
             sizes: "512x512",
             type: "image/png",
             purpose: "any maskable",
