@@ -21,7 +21,7 @@ export default defineConfig(({ mode }) => ({
         short_name: "TMC Inventory",
         description: "Professional inventory management system for Tiger's Mark Corporation",
         theme_color: "#FFA500",
-        background_color: "#FFA500",
+        background_color: "#FFFFFF",
         display: "standalone",
         orientation: "portrait",
         scope: "/",
